@@ -1,0 +1,127 @@
+ingredient_detection_task:
+  description: >
+    Your job is two steps, each performed EXACTLY ONCE — do not repeat either step.
+
+    STEP 1: Call the "Extract ingredients" tool ONCE with image_input set to the exact
+    file path: {uploaded_image}. Wait for the result. Do not call this tool again.
+
+    STEP 2: Call the "Filter ingredients" tool ONCE, passing the full text returned
+    by Step 1 as raw_ingredients. Wait for the result. Do not call this tool again.
+
+    After completing both steps, immediately return the filtered ingredient list as your
+    Final Answer. If either tool returns an error string, return that error as the Final
+    Answer — do NOT retry the tool with the same input.
+  agent: ingredient_detection_agent
+  expected_output: >
+    A comma-separated list of detected and filtered food ingredients from the image,
+    produced by calling each tool exactly once.
+
+dietary_filtering_task:
+  description: >
+    Filter the detected ingredients based on user-provided {dietary_restrictions}, if provided.
+    If no dietary restriction is provided, keep the list as is and move to the next step.
+    Perform the filtering operation only once to prevent repetitive processing.
+  agent: dietary_filtering_agent
+  expected_output: >
+    A list of filtered ingredients based on dietary restrictions, produced in a single filtering step.
+
+nutrient_analysis_task:
+  description: >
+    Provide a detailed breakdown of key nutrients such as protein, carbohydrates, fats, vitamins, and minerals based on {uploaded_image}; 
+    as well the caloric content of the food. Ends with a health evaluation for the dish.
+  agent: nutrient_analysis_agent
+  expected_output: >
+    Nutrient analysis based on the calorie estimation.
+
+recipe_suggestion_task:
+  description: >
+    The context provided to you contains the outputs of three earlier tasks:
+    1) DIETARY FILTERING RESULT — this is the definitive filtered ingredient list you MUST use.
+    2) FEEDBACK CONTEXT — past user feedback (or a no-data message if none exists).
+    3) NEWS CONTEXT — health news tips (or a no-data message if none exists).
+
+    You MUST generate recipes using ONLY the exact ingredients listed in the dietary filtering
+    result above. Do NOT invent, substitute, or add any ingredient that is not in that list.
+    The filtered ingredients are your ONLY allowed ingredients.
+
+    STEP 1 — REQUIRED: Generate 2-3 creative, complete recipes using ONLY those filtered ingredients.
+    Each recipe must have: a title, an ingredients list (only from the filtered set),
+    step-by-step instructions, and a calorie estimate per serving.
+    Ensure they are compatible with the user's {dietary_restrictions} dietary restrictions.
+
+    STEP 2 — REQUIRED: Also suggest ONE quick meal (under 15 minutes to prepare) using the same
+    filtered ingredients. Provide: title, ingredients list, instructions, prep time, calorie
+    estimate, health score (1-10), and a brief explanation of why it is a healthy choice.
+    Populate the quick_meal field of your output with this suggestion.
+
+    STEP 3 — OPTIONAL ENRICHMENT (only if data is available in the context):
+    - If the feedback context shows patterns, incorporate liked recipe styles and avoid disliked ones.
+      Add a personalization_note explaining what feedback influenced the suggestions.
+    - If health news tips are present, incorporate relevant insights where appropriate and populate
+      the health_news_tips field.
+    - If either shows no_data, skip that enrichment entirely and proceed.
+
+    Vector database data is supplementary enrichment only — its absence must NEVER prevent recipe generation.
+  agent: recipe_suggestion_agent
+  expected_output: >
+    2-3 complete recipes PLUS one quick-meal suggestion, ALL using ONLY the filtered ingredients
+    from the dietary filtering context. Each recipe includes title, ingredients (from filtered list
+    only), step-by-step instructions, and calorie estimate. The quick meal includes prep time under
+    15 min, health score, and health benefits explanation. Optionally enriched with feedback patterns
+    and health news tips when that data exists.
+
+feedback_retrieval_task:
+  description: >
+    Attempt to retrieve past user feedback from the vector database relevant to the current ingredients
+    and dietary restrictions: {dietary_restrictions}.
+    If feedback IS found: analyze patterns — what the user liked, disliked, and any specific comments,
+    then provide a preference summary for the recipe suggestion agent.
+    If NO feedback is found (the tool returns status "no_data" or an empty list): this is a first-time session.
+    Return a clear message stating there is no past feedback and the recipe agent should generate recipes
+    based purely on the filtered ingredients. Do NOT retry or loop — accept the empty result and complete the task.
+  agent: feedback_learning_agent
+  expected_output: >
+    Either: a summary of relevant past user feedback with liked/disliked patterns and personalization recommendations,
+    OR: a clear statement that no feedback exists yet and recipes should be generated from ingredients alone.
+
+news_fetch_task:
+  description: >
+    Fetch the latest health and nutrition news from trusted RSS feeds (WHO, Harvard Health, Medical News Today, NHS).
+    Store the news articles in the vector database for long-term memory.
+    Extract actionable health tips that can influence recipe suggestions.
+    Provide a brief summary of the most relevant health news.
+  agent: news_curator_agent
+  expected_output: >
+    A list of recent health news items with headlines, summaries, and extracted health tips
+    that are relevant to nutrition and can influence recipe suggestions.
+
+news_retrieval_task:
+  description: >
+    Attempt to retrieve health tips from the vector database that are relevant to the current ingredients
+    and dietary context. These tips should be based on previously stored health news.
+    If tips ARE found: format them so they can be incorporated into recipe suggestions.
+    If NO tips are found (the tool returns status "no_data" or an empty list): the news database is empty.
+    Return a clear message stating no health news is stored yet and the recipe agent should proceed
+    without health news influence. Do NOT retry or loop — accept the empty result and complete the task.
+  agent: news_curator_agent
+  expected_output: >
+    Either: relevant health tips from stored news formatted for use in recipe suggestions,
+    OR: a clear statement that no health news is stored yet and recipes should proceed without it.
+
+quick_meal_task:
+  description: >
+    Based on the available filtered ingredients (PRIMARY and mandatory input), suggest the single best
+    quick-to-make meal that maximizes health benefits. The meal must take under 15 minutes to prepare.
+    You MUST generate the quick meal from the filtered ingredients regardless of whether any vector
+    database data is available.
+
+    REQUIRED: Use the filtered ingredients to create a quick meal (under 15 min), provide a health score
+    (1-10), calorie estimate, and explain why it is a healthy choice.
+
+    OPTIONAL: If health news tips or past feedback are available (tool returns status "found"), incorporate
+    those insights. If those tools return status "no_data", skip and proceed with ingredient-based logic.
+  agent: quick_meal_agent
+  expected_output: >
+    A single quick meal suggestion with title, ingredients, instructions, prep time (under 15 min),
+    calorie estimate, health score, and explanation of health benefits. Always generated from the
+    filtered ingredients; enriched with health news or feedback only when that data exists.
