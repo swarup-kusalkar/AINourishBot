@@ -221,14 +221,17 @@ class NourishBotRecipeCrew(BaseNourishBotCrew):
         feedback_task = self.feedback_retrieval_task()
         news_task = self.news_retrieval_task()
 
-        # Build recipe task with explicit context so the agent receives the filtered
-        # ingredients directly, not just the immediately-preceding task's output.
+        # Build recipe task with explicit context so the agent receives:
+        # - ingredient_task: the original detected ingredients (belt-and-suspenders)
+        # - dietary_task: the DEFINITIVE filtered ingredient list the agent must use
+        # - feedback_task: past user feedback (or no_data)
+        # - news_task: health news tips (or no_data)
         # RecipeSuggestionOutput already contains a quick_meal field, so this single
         # task produces both recipes and the quick-meal suggestion as structured JSON.
         recipe_task = Task(
             description=self.tasks_config['recipe_suggestion_task']['description'],
             agent=self.recipe_suggestion_agent(),
-            context=[dietary_task, feedback_task, news_task],
+            context=[ingredient_task, dietary_task, feedback_task, news_task],
             expected_output=self.tasks_config['recipe_suggestion_task']['expected_output'],
             output_json=RecipeSuggestionOutput
         )

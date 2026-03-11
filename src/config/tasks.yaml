@@ -35,40 +35,53 @@ nutrient_analysis_task:
 
 recipe_suggestion_task:
   description: >
-    The context provided to you contains the outputs of three earlier tasks:
-    1) DIETARY FILTERING RESULT — this is the definitive filtered ingredient list you MUST use.
-    2) FEEDBACK CONTEXT — past user feedback (or a no-data message if none exists).
-    3) NEWS CONTEXT — health news tips (or a no-data message if none exists).
+    *** CRITICAL: YOUR FINAL ANSWER MUST CONTAIN THE COMPLETE, FULLY WRITTEN RECIPES.
+    DO NOT write "The recipes are ready" or any summary placeholder.
+    Write every recipe in full detail. The Final Answer IS the recipe content. ***
 
-    You MUST generate recipes using ONLY the exact ingredients listed in the dietary filtering
-    result above. Do NOT invent, substitute, or add any ingredient that is not in that list.
-    The filtered ingredients are your ONLY allowed ingredients.
+    BEFORE GENERATING ANYTHING, read your context and do the following:
 
-    STEP 1 — REQUIRED: Generate 2-3 creative, complete recipes using ONLY those filtered ingredients.
-    Each recipe must have: a title, an ingredients list (only from the filtered set),
-    step-by-step instructions, and a calorie estimate per serving.
-    Ensure they are compatible with the user's {dietary_restrictions} dietary restrictions.
+    PRE-STEP — Extract the ingredient list:
+    Find the DIETARY FILTERING RESULT in your context (output of the dietary_filtering_task).
+    Copy those exact ingredients. Those are your ONLY allowed ingredients.
+    Write at the very start of your response:
+    "Filtered ingredients I am using: [list every ingredient exactly as given in the dietary filtering result]"
+    Do NOT add, substitute, or invent any ingredient not in that list.
 
-    STEP 2 — REQUIRED: Also suggest ONE quick meal (under 15 minutes to prepare) using the same
-    filtered ingredients. Provide: title, ingredients list, instructions, prep time, calorie
-    estimate, health score (1-10), and a brief explanation of why it is a healthy choice.
-    Populate the quick_meal field of your output with this suggestion.
+    STEP 1 — REQUIRED: Generate 2-3 creative recipes using ONLY the copied filtered ingredients.
+    For EACH recipe provide ALL of the following in full:
+    - title: a creative name
+    - ingredients: ONLY items from the filtered list above — no extras, no substitutes
+    - instructions: numbered step-by-step cooking instructions (at least 3 steps)
+    - calorie_estimate: integer calories per serving
+    All recipes must be compatible with the user's {dietary_restrictions} dietary restrictions.
 
-    STEP 3 — OPTIONAL ENRICHMENT (only if data is available in the context):
-    - If the feedback context shows patterns, incorporate liked recipe styles and avoid disliked ones.
-      Add a personalization_note explaining what feedback influenced the suggestions.
-    - If health news tips are present, incorporate relevant insights where appropriate and populate
-      the health_news_tips field.
-    - If either shows no_data, skip that enrichment entirely and proceed.
+    STEP 2 — REQUIRED: Suggest ONE quick meal (under 15 minutes) using the same filtered ingredients.
+    Provide in full: title, ingredients (only from filtered list), step-by-step instructions,
+    prep_time (e.g. "10 minutes"), calorie_estimate (integer), health_score (integer 1-10),
+    and why_healthy (one sentence explaining the health benefit).
 
-    Vector database data is supplementary enrichment only — its absence must NEVER prevent recipe generation.
+    STEP 3 — CONDITIONAL ENRICHMENT (read context carefully before deciding):
+    - FEEDBACK: If the feedback context output contains actual user feedback patterns (liked/disliked
+      recipes, specific comments), incorporate those styles and add a personalization_note.
+      If the feedback context says "no past feedback", "no_data", or "first-time session",
+      you MUST set personalization_note to null. DO NOT MAKE UP A PERSONALIZATION NOTE.
+    - NEWS TIPS: If the news context output contains actual health tips or headlines,
+      populate health_news_tips with only those real tips from the context.
+      If the news context says "no health news", "no_data", or "news database is empty",
+      you MUST set health_news_tips to null or an empty list. DO NOT FABRICATE NEWS TIPS.
+
+    FINAL ANSWER RULE: Your Final Answer must contain the complete recipe text written in full —
+    not a one-line summary. Include recipe titles, the ingredient lists, the instructions,
+    and calorie estimates for all recipes and the quick meal.
   agent: recipe_suggestion_agent
   expected_output: >
-    2-3 complete recipes PLUS one quick-meal suggestion, ALL using ONLY the filtered ingredients
-    from the dietary filtering context. Each recipe includes title, ingredients (from filtered list
-    only), step-by-step instructions, and calorie estimate. The quick meal includes prep time under
-    15 min, health score, and health benefits explanation. Optionally enriched with feedback patterns
-    and health news tips when that data exists.
+    Filtered ingredients clearly stated, followed by 2-3 complete recipes PLUS one quick-meal
+    suggestion, ALL using ONLY those filtered ingredients. Each recipe includes: title, full
+    ingredient list (only from filtered set), numbered step-by-step instructions, and calorie
+    estimate. Quick meal includes prep time under 15 min, health score (1-10), and why_healthy.
+    personalization_note MUST be null if feedback context showed no_data or first-time session.
+    health_news_tips MUST be null/empty if news context showed no_data — never fabricated.
 
 feedback_retrieval_task:
   description: >
