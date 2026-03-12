@@ -3,12 +3,159 @@ import json
 import base64
 import time
 import os
+import re
+import contextlib
+from io import StringIO
 from src.crew import NourishBotRecipeCrew, NourishBotAnalysisCrew, NourishBotNewsCrew
 from src.vector_store import store_feedback
 from src.news_scraper import fetch_health_news, process_and_store_news, get_relevant_health_tips
 
 # Module-level state to hold the last generated recipes for feedback
 _last_recipes = []
+
+
+# ---------------------------------------------------------------------------
+# Agent thinking helpers
+# ---------------------------------------------------------------------------
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI color and style escape codes from text."""
+    return re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', text)
+
+
+def _strip_rich_borders(text: str) -> str:
+    """Remove Rich panel box-drawing characters."""
+    return re.sub(r'[╭╮╰╯│─╠╣╔╗╚╝═]+', '', text)
+
+
+def _parse_verbose_log(log_text: str) -> dict:
+    """
+    Parse CrewAI verbose stdout into {agent_name: [(step_type, text), ...]} dict.
+    step_type is one of: 'task' | 'thought' | 'action' | 'action_input' |
+                          'observation' | 'final'
+    """
+    clean = _strip_rich_borders(_strip_ansi(log_text))
+    result: dict = {}
+    current_agent = None
+    current_type = None
+    current_lines: list = []
+
+    def _flush():
+        if current_agent and current_type and current_lines:
+            result.setdefault(current_agent, []).append(
+                (current_type, ' '.join(current_lines).strip())
+            )
+
+    for raw_line in clean.split('\n'):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        # Detect agent header: "## Agent: ..."
+        m = re.search(r'##\s*Agent:\s*(.+)', line)
+        if m:
+            _flush()
+            current_agent = m.group(1).strip()
+            current_type = None
+            current_lines = []
+            continue
+
+        if current_agent is None:
+            continue
+
+        # Skip chain markers
+        if re.search(r'Entering new|Finished chain|> Entering|> Finished', line):
+            continue
+
+        # Detect step-type prefixes (order matters – check Action Input before Action)
+        if re.match(r'^## Task:', line):
+            _flush(); current_type = 'task';         current_lines = [line[8:].strip()]
+        elif re.match(r'^Thought:', line):
+            _flush(); current_type = 'thought';      current_lines = [line[8:].strip()]
+        elif re.match(r'^Action Input:', line):
+            _flush(); current_type = 'action_input'; current_lines = [line[13:].strip()]
+        elif re.match(r'^Action:', line):
+            _flush(); current_type = 'action';       current_lines = [line[7:].strip()]
+        elif re.match(r'^Observation:', line):
+            _flush(); current_type = 'observation';  current_lines = [line[12:].strip()]
+        elif re.match(r'^Final Answer:', line):
+            _flush(); current_type = 'final';        current_lines = [line[13:].strip()]
+        elif current_type:
+            current_lines.append(line)
+
+    _flush()
+    return result
+
+
+def _build_thinking_sections(tasks_output: list, verbose_log: str = "") -> list:
+    """
+    Return list of (agent_name, steps_markdown_str) for progressive UI reveal.
+
+    Primary source: crew_result.tasks_output  →  gives agent name + task context
+    Secondary source: parsed verbose stdout    →  gives Thought/Action/Observation
+    """
+    parsed = _parse_verbose_log(verbose_log) if verbose_log.strip() else {}
+    sections = []
+
+    if tasks_output:
+        for task_out in tasks_output:
+            agent_name  = (getattr(task_out, 'agent',       None) or 'Agent').strip()
+            description = (getattr(task_out, 'description', None) or '').strip()
+            raw_out     = (getattr(task_out, 'raw',         None) or '').strip()
+            summary     = (getattr(task_out, 'summary',     None) or '').strip()
+
+            md = ""
+            if description:
+                short = description[:200]
+                md += f"📋 **Task:** {short}{'...' if len(description) > 200 else ''}\n\n"
+
+            agent_steps = parsed.get(agent_name, [])
+            if agent_steps:
+                for stype, stext in agent_steps:
+                    t = stext.strip()
+                    if not t:
+                        continue
+                    if stype == 'thought':
+                        md += f"💭 **Thinking:** *{t[:350]}{'...' if len(t) > 350 else ''}*\n\n"
+                    elif stype == 'action':
+                        md += f"🔧 **Using Tool:** `{t}`\n\n"
+                    elif stype == 'action_input':
+                        md += f"📥 **Tool Input:** `{t[:200]}`\n\n"
+                    elif stype == 'observation':
+                        md += f"📊 **Observed:** {t[:350]}{'...' if len(t) > 350 else ''}\n\n"
+                    elif stype == 'final':
+                        md += f"✅ **Concluded:** {t[:250]}\n\n"
+            else:
+                out = (summary or raw_out)[:300]
+                if out:
+                    md += f"✅ **Output:** {out}{'...' if len(raw_out) > 300 else ''}\n\n"
+
+            if md.strip():
+                sections.append((agent_name, md))
+
+    elif parsed:
+        # No tasks_output – fall back to verbose log only
+        for agent_name, steps in parsed.items():
+            md = ""
+            for stype, stext in steps:
+                t = stext.strip()
+                if not t:
+                    continue
+                if stype == 'thought':
+                    md += f"💭 **Thinking:** *{t[:350]}*\n\n"
+                elif stype == 'action':
+                    md += f"🔧 **Using Tool:** `{t}`\n\n"
+                elif stype == 'action_input':
+                    md += f"📥 **Tool Input:** `{t[:200]}`\n\n"
+                elif stype == 'observation':
+                    md += f"📊 **Observed:** {t[:350]}\n\n"
+                elif stype == 'final':
+                    md += f"✅ **Concluded:** {t[:250]}\n\n"
+            if md.strip():
+                sections.append((agent_name, md))
+
+    return sections
+
 
 def format_recipe_output(final_output):
     """
@@ -160,26 +307,26 @@ def format_analysis_output(final_output):
     return output
 
 
-def analyze_food(image, dietary_restrictions, workflow_type, progress=gr.Progress(track_tqdm=True)):
+def analyze_food(image, dietary_restrictions, workflow_type):
     """
-    Wrapper function for the Gradio interface.
-    
+    Generator function for the Gradio interface.
+    Yields (result_markdown, thinking_update) tuples so the result appears first,
+    followed by a progressive stream of each agent's reasoning.
+
     :param image: Uploaded image (PIL format)
-    :param dietary_restrictions: Dietary restriction as a string (e.g., "vegan")
-    :param workflow_type: Workflow type ("recipe" or "analysis")
-    :return: Result from the NourishBot workflow.
+    :param dietary_restrictions: Dietary restriction string (e.g., "vegan")
+    :param workflow_type: "recipe" or "analysis"
     """
-    
+
     image_path = os.path.abspath("uploaded_image.jpg")
-    image.save(image_path)  # Save the uploaded image to an absolute path
+    image.save(image_path)
 
     inputs = {
         'uploaded_image': image_path,
         'dietary_restrictions': dietary_restrictions,
         'workflow_type': workflow_type
     }
-    
-    # Initialize the appropriate crew instance based on workflow type
+
     if workflow_type == "recipe":
         crew_instance = NourishBotRecipeCrew(
             image_data=image_path,
@@ -190,27 +337,72 @@ def analyze_food(image, dietary_restrictions, workflow_type, progress=gr.Progres
             image_data=image_path
         )
     else:
-        return "Invalid workflow type. Choose 'recipe' or 'analysis'."
+        yield "Invalid workflow type. Choose 'recipe' or 'analysis'.", gr.update(visible=False)
+        return
 
-    # Run the crew workflow and get the result
+    # Run the crew while capturing stdout so we can pick up Thought/Action/Observation lines
+    captured_log = StringIO()
     crew_obj = crew_instance.crew()
-    crew_result = crew_obj.kickoff(inputs=inputs)
+    with contextlib.redirect_stdout(captured_log):
+        crew_result = crew_obj.kickoff(inputs=inputs)
+    verbose_log = captured_log.getvalue()
 
+    # ── Format the primary result ──────────────────────────────────────────
     if workflow_type == "recipe":
-        # Extract structured JSON from output_json — prefer json_dict, fall back to pydantic
         recipe_data = {}
         if hasattr(crew_result, 'json_dict') and crew_result.json_dict:
             recipe_data = crew_result.json_dict
         elif hasattr(crew_result, 'pydantic') and crew_result.pydantic:
             recipe_data = crew_result.pydantic.model_dump()
-        return format_recipe_output(recipe_data)
-    elif workflow_type == "analysis":
+        formatted_result = format_recipe_output(recipe_data)
+    else:
         analysis_data = {}
         if hasattr(crew_result, 'json_dict') and crew_result.json_dict:
             analysis_data = crew_result.json_dict
         elif hasattr(crew_result, 'pydantic') and crew_result.pydantic:
             analysis_data = crew_result.pydantic.model_dump()
-        return format_analysis_output(analysis_data)
+        formatted_result = format_analysis_output(analysis_data)
+
+    # ── First yield: show the result immediately ──────────────────────────
+    yield formatted_result, gr.update(
+        value="⏳ *Assembling agent thinking log...*",
+        visible=True
+    )
+    time.sleep(0.5)
+
+    # ── Build thinking sections from tasks_output + verbose log ───────────
+    tasks_output = getattr(crew_result, 'tasks_output', []) or []
+    thinking_sections = _build_thinking_sections(tasks_output, verbose_log)
+
+    # ── Stream the thinking header ────────────────────────────────────────
+    accumulated = (
+        "## 🧠 Agent Thinking Process\n\n"
+        "> *How each AI agent reasoned through your request, step by step.*\n\n"
+    )
+    yield formatted_result, gr.update(value=accumulated)
+    time.sleep(0.2)
+
+    if thinking_sections:
+        for agent_name, steps_md in thinking_sections:
+            # Show agent header first
+            accumulated += f"### 🤖 {agent_name}\n\n"
+            yield formatted_result, gr.update(value=accumulated)
+            time.sleep(0.35)
+
+            # Stream each non-empty line of the agent's steps
+            for line in steps_md.split('\n'):
+                accumulated += line + "\n"
+                if line.strip():
+                    yield formatted_result, gr.update(value=accumulated)
+                    time.sleep(0.07)
+
+            # Divider after each agent
+            accumulated += "\n---\n\n"
+            yield formatted_result, gr.update(value=accumulated)
+            time.sleep(0.25)
+    else:
+        accumulated += "*Detailed thinking data was not captured for this run.*\n"
+        yield formatted_result, gr.update(value=accumulated)
 
 
 def submit_feedback(recipe_name, rating, comment, dietary_restrictions):
@@ -273,6 +465,14 @@ css = """
     border-radius: 10px;
     padding: 15px;
     margin-top: 10px;
+}
+
+#agent-thinking-display {
+    border: 2px solid #6366f1 !important;
+    border-radius: 12px !important;
+    padding: 20px !important;
+    background: rgba(99, 102, 241, 0.06) !important;
+    margin-top: 10px !important;
 }
 """
 
@@ -344,6 +544,16 @@ with gr.Blocks(theme=gr.themes.Citrus(), css=css, js=js) as demo:
                 height=500
             )
 
+    # ---- Agent Thinking Section ----
+    with gr.Row():
+        thinking_display = gr.Markdown(
+            value="",
+            visible=False,
+            elem_id="agent-thinking-display",
+            height=500,
+            label="Agent Thinking Process"
+        )
+
     # ---- Feedback Section ----
     gr.Markdown("---")
     gr.Markdown("## 💬 Recipe Feedback (Learning Agent)", elem_classes="title")
@@ -391,7 +601,7 @@ with gr.Blocks(theme=gr.themes.Citrus(), css=css, js=js) as demo:
     submit_btn.click(
         fn=analyze_food,
         inputs=[image_input, dietary_input, workflow_radio],
-        outputs=result_display
+        outputs=[result_display, thinking_display]
     )
 
 # Launch the Gradio interface
